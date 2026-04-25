@@ -6,11 +6,11 @@ import keyboard
 import time
 import win32gui
 import win32con
+import win32api
 import win32process
 import psutil
 import ctypes
 
-# ================== 开启系统 DPI 感知 ==================
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(2)
 except AttributeError:
@@ -19,29 +19,33 @@ except AttributeError:
     except:
         pass
 
-pydirectinput.PAUSE = 0  # 极其关键，关闭原生指令等待时间以适应百赫兹级下发
+pydirectinput.PAUSE = 0  
 
 # ======================= 配置区 =======================
 PROCESS_NAME = "HTGame.exe"
+
+# ----- 按键输入发送模式控制 -----
+# 设为 True 尝试实现无干扰后台发送。若进游戏无效则说明被物理防封，需设回 False 运行挂机。
+BACKGROUND_MODE = True  
 
 SLIDER_ROI = (592, 58, 742, 29)
 
 GREEN_LOWER = np.array([35, 130, 0])
 GREEN_UPPER = np.array([89, 255, 255])
-
 YELLOW_LOWER = np.array([0, 0, 70])
 YELLOW_UPPER = np.array([60, 255, 255])
 
 KEY_LEFT = 'a'
 KEY_RIGHT = 'd'
 
-CENTER_TOLERANCE = 8     # 核心中点静态靠拢死区（微调缩小死区可以跟得更紧凑）
-
-# ===== 高级运动控制（前馈追踪）核心调参参数 =====
-# “预测时间（秒）”：打多少时间后的提前量？决定跟运动趋势纠正的侵略性。
-# 如设置为 0.08，系统计算认为滑块正向左滑时，就预先按左边0.08s时即将达到的地方作为中心！可以自行加减(0.02~0.25区间均有效)。
-PREDICT_TIME = 0.08
+# 减小中心盲区（让其时刻修正，不再等到偏差变大才动手），默认从8降到了3。
+CENTER_TOLERANCE = 3
+PREDICT_TIME = 0.08      
 # ======================================================
+
+VK_CODE = {
+    'a': 0x41, 'd': 0x44, 'f': 0x46
+}
 
 _cached_hwnd = None
 
@@ -106,41 +110,85 @@ def find_green_bounds_x(hsv_img):
         return np.min(x_coords), np.max(x_coords)
     return None, None
 
+def simulate_keydown(key):
+    hwnd = get_hwnd_by_process_name(PROCESS_NAME)
+    if BACKGROUND_MODE and hwnd:
+        win32api.PostMessage(hwnd, win32con.WM_KEYDOWN, VK_CODE.get(key, 0), 0)
+    else:
+        pydirectinput.keyDown(key)
+
+def simulate_keyup(key):
+    hwnd = get_hwnd_by_process_name(PROCESS_NAME)
+    if BACKGROUND_MODE and hwnd:
+        win32api.PostMessage(hwnd, win32con.WM_KEYUP, VK_CODE.get(key, 0), 0)
+    else:
+        pydirectinput.keyUp(key)
+
+def simulate_press(key):
+    hwnd = get_hwnd_by_process_name(PROCESS_NAME)
+    if BACKGROUND_MODE and hwnd:
+        win32api.PostMessage(hwnd, win32con.WM_KEYDOWN, VK_CODE.get(key, 0), 0)
+        time.sleep(0.05)
+        win32api.PostMessage(hwnd, win32con.WM_KEYUP, VK_CODE.get(key, 0), 0)
+    else:
+        pydirectinput.press(key)
+
+def simulate_left_click():
+    hwnd = get_hwnd_by_process_name(PROCESS_NAME)
+    if BACKGROUND_MODE and hwnd:
+        # 打包一条安全中心区标定的坐标
+        rect = win32gui.GetClientRect(hwnd)
+        center_lparam = win32api.MAKELONG(rect[2] // 2, rect[3] // 2)
+        win32api.PostMessage(hwnd, win32con.WM_LBUTTONDOWN, win32con.MK_LBUTTON, center_lparam)
+        time.sleep(0.05)
+        win32api.PostMessage(hwnd, win32con.WM_LBUTTONUP, 0, center_lparam)
+    else:
+        pydirectinput.click()
+
+def force_release_all_keys():
+    simulate_keyup(KEY_LEFT)
+    simulate_keyup(KEY_RIGHT)
+
 def auto_fishing():
-    print(f"等待检测到游戏进程[{PROCESS_NAME}] 的窗口...")
+    print(f"等待获取 [{PROCESS_NAME}]...")
     while get_window_bbox(PROCESS_NAME) is None:
         time.sleep(1)
         if keyboard.is_pressed('q'):
             return
 
-    print("自动钓鱼脚本已启动！按 'q' 键退出。")
+    print("准备完毕。按 Q 结束运行。")
     state = "IDLE"
-    miss_frames = 0
     current_held_key = None
     
-    # 【运动检测相关状态】
+    miss_frames = 0
+    smooth_green_vel = 0.0
     last_green_center = None
-    last_loop_time = time.time()
-    smooth_green_vel = 0.0  # 平滑过的绿条移动速度（像素/秒）
+    last_valid_time = 0.0
 
     def switch_key(new_key):
         nonlocal current_held_key
         if current_held_key != new_key:
             if current_held_key is not None:
-                pydirectinput.keyUp(current_held_key)
+                simulate_keyup(current_held_key)
             if new_key is not None:
-                pydirectinput.keyDown(new_key)
+                simulate_keydown(new_key)
             current_held_key = new_key
+
+    def init_fishing_control(first_green_center):
+        nonlocal miss_frames, smooth_green_vel, last_green_center, last_valid_time, current_held_key
+        miss_frames = 0
+        smooth_green_vel = 0.0
+        last_green_center = first_green_center
+        last_valid_time = time.time()
+        
+        force_release_all_keys()
+        current_held_key = None
 
     with mss.mss() as sct:
         while True:
-            curr_time = time.time()
-            dt = curr_time - last_loop_time  # 当前迭代使用时间
-            last_loop_time = curr_time
-
             if keyboard.is_pressed('q'):
-                switch_key(None)
-                print("退出脚本。")
+                force_release_all_keys()
+                print("手动结束。")
                 break
 
             bbox = get_window_bbox(PROCESS_NAME)
@@ -148,7 +196,6 @@ def auto_fishing():
                 time.sleep(1)
                 continue
 
-            # 使用全像素区域截图提升转换响应
             img = np.array(sct.grab(bbox))
             img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
             img_1080p = cv2.resize(img, (1920, 1080))
@@ -159,17 +206,16 @@ def auto_fishing():
 
             green_min_x, green_max_x = find_green_bounds_x(hsv_slider)
             yellow_x = find_yellow_center_x(hsv_slider)
+            curr_time = time.time()
 
             if state == "IDLE":
                 if green_min_x is not None:
-                    print("[状态] 检测到目标，进入【预测追踪模式】...")
+                    green_center_x = (green_min_x + green_max_x) // 2
+                    init_fishing_control(green_center_x)
                     state = "REELING"
-                    miss_frames = 0
-                    smooth_green_vel = 0.0  # 切入控鱼瞬间复位惯性
-                    last_green_center = (green_min_x + green_max_x) // 2
                 else:
-                    pydirectinput.press('f')
-                    pydirectinput.click()
+                    simulate_press('f')
+                    simulate_left_click()
                     time.sleep(0.2)
 
             elif state == "REELING":
@@ -177,46 +223,42 @@ def auto_fishing():
                     miss_frames = 0 
                     green_center_x = (green_min_x + green_max_x) // 2
                     
-                    # 1. ==== 计算猎物绿条实时速度并降噪 ====
-                    if last_green_center is not None and dt > 0.0001:
-                        instant_vel = (green_center_x - last_green_center) / dt
-                        # 进行指数级滑动平均(EMA)抑制微抖造成的测速失准,只取大趋势方向(加权融合：60%上一帧大势，40%最新抓取切变)
-                        smooth_green_vel = 0.6 * smooth_green_vel + 0.4 * instant_vel
-                    else:
-                        smooth_green_vel = 0.0
+                    if last_green_center is not None and green_center_x != last_green_center:
+                        dt = curr_time - last_valid_time
+                        if 0 < dt < 0.2:
+                            instant_vel = (green_center_x - last_green_center) / dt
+                            # 【核心灵敏度修改项】：75%的比重取于即时的当前滑块新瞬时切动量速度，极大幅加强紧咬跟随
+                            smooth_green_vel = 0.25 * smooth_green_vel + 0.75 * instant_vel
+                        else:
+                            smooth_green_vel = 0.0
+                        
+                        last_green_center = green_center_x
+                        last_valid_time = curr_time
 
-                    last_green_center = green_center_x
-
-                    # 2. ==== 核心前馈追踪偏移介入 ====
-                    # 并非直瞄真正的绿条当前中线了，目标打在 “速度*前视预期系数” 上！
                     predict_offset = smooth_green_vel * PREDICT_TIME 
                     aiming_target_x = green_center_x + predict_offset
                     
-                    # 给定物理边界封印保护机制 (再怎么被速度甩也至少强制向框死在这个内围区间瞄准避免越野导致滑钩)：
-                    max_boundary_pull_out = 10 # 防止将指针指导跑到绿边之外
+                    max_boundary_pull_out = 10 
                     min_valid = green_min_x + max_boundary_pull_out
                     max_valid = green_max_x - max_boundary_pull_out
-                    
-                    # 这也是精简写法的钳制安全区间边界
                     aiming_target_x = max(min_valid, min(aiming_target_x, max_valid)) 
 
-                    # 3. ==== 下行击发：执行运动纠集操作 ====
-                    # 这时由于aiming_target被极大向前拽引（发生急变方向回正左侧偏移后），当前小鱼即便还在偏左也极大可能相对目标靶心是“过度偏右状态”。触发 A
                     if yellow_x < aiming_target_x - CENTER_TOLERANCE:
                         switch_key(KEY_RIGHT)
                     elif yellow_x > aiming_target_x + CENTER_TOLERANCE:
                         switch_key(KEY_LEFT)
                     else:
-                        # 指挥跟车咬到最内部目标位置(已经达到未来的轨迹核心)，关发停放状态。
                         switch_key(None)
-
                 else:
                     miss_frames += 1
                     switch_key(None)
-                    if miss_frames > 15: # 加宽退出条件帧(防止刷新时机微频闪)
-                        print("[状态] 绿段丢失保护收线触发，等待返回休眠。")
-                        time.sleep(1)
+
+                    if miss_frames > 15: 
+                        switch_key(None)
+                        force_release_all_keys() 
+                        time.sleep(1) 
                         state = "IDLE"
+
             time.sleep(0.002)
 
 if __name__ == "__main__":
