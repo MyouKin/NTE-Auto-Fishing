@@ -1,0 +1,7 @@
+opencv-python>=4.5.0
+numpy>=1.21.0
+mss>=6.1.0
+pydirectinput>=1.0.4
+keyboard>=0.13.5
+pywin32>=300
+psutil>=5.8.0
