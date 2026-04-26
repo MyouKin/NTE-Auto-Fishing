@@ -27,7 +27,7 @@ BACKGROUND_MODE = True
 
 SLIDER_ROI = (608, 65, 713, 20)
 
-GREEN_LOWER = np.array([35, 130, 0])
+GREEN_LOWER = np.array([35, 190, 0])
 GREEN_UPPER = np.array([90, 255, 255])
 YELLOW_LOWER = np.array([0, 0, 180])
 YELLOW_UPPER = np.array([60, 160, 255])
