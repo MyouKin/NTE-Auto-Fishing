@@ -10,6 +10,7 @@ import win32api
 import win32process
 import psutil
 import ctypes
+import threading
 
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(2)
@@ -29,7 +30,7 @@ SLIDER_ROI = (608, 65, 713, 20)
 
 GREEN_LOWER = np.array([35, 190, 0])
 GREEN_UPPER = np.array([90, 255, 255])
-YELLOW_LOWER = np.array([0, 0, 180])
+YELLOW_LOWER = np.array([0, 0, 215])
 YELLOW_UPPER = np.array([60, 160, 255])
 
 KEY_LEFT = 'a'
@@ -37,7 +38,10 @@ KEY_RIGHT = 'd'
 CENTER_TOLERANCE = 3
 PREDICT_TIME = 0.08      
 
-MORPH_KERNEL_SIZE = 10
+MORPH_KERNEL_SIZE = 21
+
+# 定义全局进程循环生死标签
+IS_RUNNING = False
 # ======================================================
 
 VK_CODE = {
@@ -145,12 +149,29 @@ def force_release_all_keys():
     simulate_keyup(KEY_RIGHT)
 
 def auto_fishing():
+    global IS_RUNNING
+    
     print(f"等待获取 [{PROCESS_NAME}]...")
     while get_window_bbox(PROCESS_NAME) is None:
         time.sleep(1)
         if keyboard.is_pressed('q'): return
 
-    print("准备完毕。按 Q 结束运行。")
+    print("已启动，连按Q关闭脚本。")
+    IS_RUNNING = True
+    
+    # ---------------- 极简狂爆发送机器 ----------------
+    def _click_spammer_thread():
+        while IS_RUNNING:
+            if get_hwnd_by_process_name(PROCESS_NAME):
+                simulate_press('f')
+                time.sleep(0.05)
+                simulate_left_click()
+            time.sleep(0.2)  
+            
+    # 设置一个幕后的死锁子代进行异步死循环操作：
+    threading.Thread(target=_click_spammer_thread, daemon=True).start()
+    # ------------------------------------------------
+
     state = "IDLE"
     current_held_key = None
     
@@ -179,6 +200,7 @@ def auto_fishing():
     with mss.mss() as sct:
         while True:
             if keyboard.is_pressed('q'):
+                IS_RUNNING = False
                 force_release_all_keys()
                 break
 
@@ -204,10 +226,6 @@ def auto_fishing():
                     green_center_x = (green_min_x + green_max_x) // 2
                     init_fishing_control(green_center_x)
                     state = "REELING"
-                else:
-                    simulate_press('f')
-                    simulate_left_click()
-                    time.sleep(0.2)
 
             elif state == "REELING":
                 if green_min_x is not None and yellow_x is not None:
