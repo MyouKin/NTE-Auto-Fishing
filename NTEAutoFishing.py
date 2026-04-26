@@ -23,30 +23,26 @@ pydirectinput.PAUSE = 0
 
 # ======================= 配置区 =======================
 PROCESS_NAME = "HTGame.exe"
-
-# ----- 按键输入发送模式控制 -----
-# 设为 True 尝试实现无干扰后台发送。若进游戏无效则说明被物理防封，需设回 False 运行挂机。
 BACKGROUND_MODE = True  
 
-SLIDER_ROI = (592, 58, 742, 29)
+SLIDER_ROI = (608, 65, 713, 20)
 
 GREEN_LOWER = np.array([35, 130, 0])
-GREEN_UPPER = np.array([89, 255, 255])
-YELLOW_LOWER = np.array([0, 0, 70])
-YELLOW_UPPER = np.array([60, 255, 255])
+GREEN_UPPER = np.array([90, 255, 255])
+YELLOW_LOWER = np.array([0, 0, 180])
+YELLOW_UPPER = np.array([60, 160, 255])
 
 KEY_LEFT = 'a'
 KEY_RIGHT = 'd'
-
-# 减小中心盲区（让其时刻修正，不再等到偏差变大才动手），默认从8降到了3。
 CENTER_TOLERANCE = 3
 PREDICT_TIME = 0.08      
+
+MORPH_KERNEL_SIZE = 10
 # ======================================================
 
 VK_CODE = {
     'a': 0x41, 'd': 0x44, 'f': 0x46
 }
-
 _cached_hwnd = None
 
 def get_hwnd_by_process_name(process_name):
@@ -59,17 +55,14 @@ def get_hwnd_by_process_name(process_name):
         if proc.info['name'] and proc.info['name'].lower() == process_name.lower():
             target_pid = proc.info['pid']
             break
-            
-    if not target_pid:
-        return None
+    if not target_pid: return None
 
     def callback(hwnd, hwnds):
         if win32gui.IsWindowVisible(hwnd):
             _, pid = win32process.GetWindowThreadProcessId(hwnd)
             if pid == target_pid:
                 rect = win32gui.GetClientRect(hwnd)
-                if rect[2] > 0 and rect[3] > 0:
-                    hwnds.append(hwnd)
+                if rect[2] > 0 and rect[3] > 0: hwnds.append(hwnd)
         return True
 
     hwnds =[]
@@ -81,8 +74,7 @@ def get_hwnd_by_process_name(process_name):
 
 def get_window_bbox(process_name):
     hwnd = get_hwnd_by_process_name(process_name)
-    if not hwnd:
-        return None
+    if not hwnd: return None
     try:
         rect = win32gui.GetClientRect(hwnd)
         point = win32gui.ClientToScreen(hwnd, (0, 0))
@@ -99,12 +91,16 @@ def find_yellow_center_x(hsv_img):
         c = max(contours, key=cv2.contourArea)
         if cv2.contourArea(c) > 5:
             M = cv2.moments(c)
-            if M["m00"] != 0:
-                return int(M["m10"] / M["m00"])
+            if M["m00"] != 0: return int(M["m10"] / M["m00"])
     return None
 
 def find_green_bounds_x(hsv_img):
     mask = cv2.inRange(hsv_img, GREEN_LOWER, GREEN_UPPER)
+
+    if MORPH_KERNEL_SIZE > 0:
+        kernel = np.ones((MORPH_KERNEL_SIZE, MORPH_KERNEL_SIZE), np.uint8)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    
     x_coords = np.where(mask > 0)[1]
     if len(x_coords) > 20: 
         return np.min(x_coords), np.max(x_coords)
@@ -136,7 +132,6 @@ def simulate_press(key):
 def simulate_left_click():
     hwnd = get_hwnd_by_process_name(PROCESS_NAME)
     if BACKGROUND_MODE and hwnd:
-        # 打包一条安全中心区标定的坐标
         rect = win32gui.GetClientRect(hwnd)
         center_lparam = win32api.MAKELONG(rect[2] // 2, rect[3] // 2)
         win32api.PostMessage(hwnd, win32con.WM_LBUTTONDOWN, win32con.MK_LBUTTON, center_lparam)
@@ -153,8 +148,7 @@ def auto_fishing():
     print(f"等待获取 [{PROCESS_NAME}]...")
     while get_window_bbox(PROCESS_NAME) is None:
         time.sleep(1)
-        if keyboard.is_pressed('q'):
-            return
+        if keyboard.is_pressed('q'): return
 
     print("准备完毕。按 Q 结束运行。")
     state = "IDLE"
@@ -168,10 +162,8 @@ def auto_fishing():
     def switch_key(new_key):
         nonlocal current_held_key
         if current_held_key != new_key:
-            if current_held_key is not None:
-                simulate_keyup(current_held_key)
-            if new_key is not None:
-                simulate_keydown(new_key)
+            if current_held_key is not None: simulate_keyup(current_held_key)
+            if new_key is not None: simulate_keydown(new_key)
             current_held_key = new_key
 
     def init_fishing_control(first_green_center):
@@ -188,7 +180,6 @@ def auto_fishing():
         while True:
             if keyboard.is_pressed('q'):
                 force_release_all_keys()
-                print("手动结束。")
                 break
 
             bbox = get_window_bbox(PROCESS_NAME)
@@ -227,7 +218,6 @@ def auto_fishing():
                         dt = curr_time - last_valid_time
                         if 0 < dt < 0.2:
                             instant_vel = (green_center_x - last_green_center) / dt
-                            # 【核心灵敏度修改项】：75%的比重取于即时的当前滑块新瞬时切动量速度，极大幅加强紧咬跟随
                             smooth_green_vel = 0.25 * smooth_green_vel + 0.75 * instant_vel
                         else:
                             smooth_green_vel = 0.0
