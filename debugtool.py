@@ -91,8 +91,9 @@ def debug_screen_and_color():
         cv2.createTrackbar("V Min", "Color Debugger", 0, 255, nothing)
         cv2.createTrackbar("V Max", "Color Debugger", 255, 255, nothing)
         
-        # [新增] 闭操作内核大小调整控制杆
         cv2.createTrackbar("Close Size", "Color Debugger", 21, 100, nothing)
+        # [新增] 最小像素面积过滤控制杆（默认过滤小于20像素面积的光斑干扰）
+        cv2.createTrackbar("Min Area", "Color Debugger", 20, 10000, nothing)
 
         while True:
             h_min = cv2.getTrackbarPos("H Min", "Color Debugger")
@@ -102,6 +103,7 @@ def debug_screen_and_color():
             v_min = cv2.getTrackbarPos("V Min", "Color Debugger")
             v_max = cv2.getTrackbarPos("V Max", "Color Debugger")
             c_size = cv2.getTrackbarPos("Close Size", "Color Debugger")
+            min_area = cv2.getTrackbarPos("Min Area", "Color Debugger")
 
             lower = np.array([h_min, s_min, v_min])
             upper = np.array([h_max, s_max, v_max])
@@ -109,25 +111,36 @@ def debug_screen_and_color():
             hsv = cv2.cvtColor(roi_img, cv2.COLOR_BGR2HSV)
             mask = cv2.inRange(hsv, lower, upper)
             
-            #[核心执行区] 进行形态学闭操作修复连通断点
-            c_size = max(1, c_size) # 防止大小为0抛异常
+            # 进行形态学闭操作修复连通断点
+            c_size = max(1, c_size)
             kernel = np.ones((c_size, c_size), np.uint8)
             mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
 
-            result = cv2.bitwise_and(roi_img, roi_img, mask=mask)
+            # [新增] 使用获取轮廓寻找区块，只有高于面积阈值的噪块才准许画回到全新净化白模面上
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            clean_mask = np.zeros_like(mask)
+            for c in contours:
+                if cv2.contourArea(c) >= min_area:
+                    cv2.drawContours(clean_mask, [c], -1, 255, -1)
+            
+            # 使用清理后无噪点的干净层替换操作目标掩膜层
+            mask = clean_mask
 
+            result = cv2.bitwise_and(roi_img, roi_img, mask=mask)
             mask_bgr = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
             stacked = np.hstack((roi_img, mask_bgr, result))
             
             cv2.imshow("Color Debugger", stacked)
 
             if cv2.waitKey(1) & 0xFF == 27:
-                print(f"\n===== 将以下参数复制到 NTEAutoFishing.py 配置区 =====")
+                print(f"\n===== 将以下参数应用到程序配置 =====")
                 print(f"ROI = {roi}")
                 print(f"LOWER = np.array([{h_min}, {s_min}, {v_min}])")
                 print(f"UPPER = np.array([{h_max}, {s_max}, {v_max}])")
                 print(f"MORPH_KERNEL_SIZE = {c_size}")
-                print(f"=====================================================")
+                print(f"MIN_AREA_THRESHOLD = {min_area}")
+                print(f"====================================")
+                print("\n[注]: 可将自动运行脚本寻找轮廓代码部分的 contourArea > xx 的底层限制，替换为本测算数据。\n")
                 break
 
         cv2.destroyAllWindows()

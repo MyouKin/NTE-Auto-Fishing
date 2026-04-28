@@ -28,7 +28,7 @@ BACKGROUND_MODE = True
 
 SLIDER_ROI = (608, 65, 713, 20)
 
-GREEN_LOWER = np.array([35, 190, 0])
+GREEN_LOWER = np.array([70, 190, 0])
 GREEN_UPPER = np.array([90, 255, 255])
 YELLOW_LOWER = np.array([0, 0, 215])
 YELLOW_UPPER = np.array([60, 160, 255])
@@ -37,10 +37,12 @@ KEY_LEFT = 'a'
 KEY_RIGHT = 'd'
 CENTER_TOLERANCE = 3
 PREDICT_TIME = 0.08      
-
 MORPH_KERNEL_SIZE = 21
 
-# 定义全局进程循环生死标签
+# 新增面积噪音限制设定
+GREEN_MIN_AREA = 1500
+
+STATE_TIMEOUT = 20.0   
 IS_RUNNING = False
 # ======================================================
 
@@ -88,8 +90,7 @@ def get_window_bbox(process_name):
         _cached_hwnd = None
         return None
 
-def find_yellow_center_x(hsv_img):
-    mask = cv2.inRange(hsv_img, YELLOW_LOWER, YELLOW_UPPER)
+def find_yellow_center_from_mask(mask):
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if contours:
         c = max(contours, key=cv2.contourArea)
@@ -98,16 +99,11 @@ def find_yellow_center_x(hsv_img):
             if M["m00"] != 0: return int(M["m10"] / M["m00"])
     return None
 
-def find_green_bounds_x(hsv_img):
-    mask = cv2.inRange(hsv_img, GREEN_LOWER, GREEN_UPPER)
-
-    if MORPH_KERNEL_SIZE > 0:
-        kernel = np.ones((MORPH_KERNEL_SIZE, MORPH_KERNEL_SIZE), np.uint8)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-    
+def find_green_bounds_from_mask(mask):
+    # 此处接收到的 mask 在函数外已提前完成了高低画面的全面面积清算（保留的必定有效），只需负责获取界限极点。
     x_coords = np.where(mask > 0)[1]
-    if len(x_coords) > 20: 
-        return np.min(x_coords), np.max(x_coords)
+    if len(x_coords) > 0: 
+        return int(np.min(x_coords)), int(np.max(x_coords))
     return None, None
 
 def simulate_keydown(key):
@@ -151,15 +147,14 @@ def force_release_all_keys():
 def auto_fishing():
     global IS_RUNNING
     
-    print(f"等待获取 [{PROCESS_NAME}]...")
+    print(f"等待获取[{PROCESS_NAME}] 窗口...")
     while get_window_bbox(PROCESS_NAME) is None:
         time.sleep(1)
         if keyboard.is_pressed('q'): return
 
-    print("已启动，连按Q关闭脚本。")
+    print("启动运作...按 Q (也可在监视窗激活时)结束执行。")
     IS_RUNNING = True
     
-    # ---------------- 极简狂爆发送机器 ----------------
     def _click_spammer_thread():
         while IS_RUNNING:
             if get_hwnd_by_process_name(PROCESS_NAME):
@@ -168,17 +163,19 @@ def auto_fishing():
                 simulate_left_click()
             time.sleep(0.2)  
             
-    # 设置一个幕后的死锁子代进行异步死循环操作：
     threading.Thread(target=_click_spammer_thread, daemon=True).start()
-    # ------------------------------------------------
 
     state = "IDLE"
+    state_start_time = time.time() 
     current_held_key = None
     
     miss_frames = 0
     smooth_green_vel = 0.0
     last_green_center = None
     last_valid_time = 0.0
+
+    cv2.namedWindow("Debug Vision", cv2.WINDOW_NORMAL)
+    cv2.resizeWindow("Debug Vision", SLIDER_ROI[2] * 2, SLIDER_ROI[3] * 6)
 
     def switch_key(new_key):
         nonlocal current_held_key
@@ -188,25 +185,26 @@ def auto_fishing():
             current_held_key = new_key
 
     def init_fishing_control(first_green_center):
-        nonlocal miss_frames, smooth_green_vel, last_green_center, last_valid_time, current_held_key
+        nonlocal miss_frames, smooth_green_vel, last_green_center, last_valid_time, current_held_key, state_start_time
         miss_frames = 0
         smooth_green_vel = 0.0
         last_green_center = first_green_center
         last_valid_time = time.time()
-        
+        state_start_time = time.time()
         force_release_all_keys()
         current_held_key = None
 
     with mss.mss() as sct:
         while True:
-            if keyboard.is_pressed('q'):
+            key_in = cv2.waitKey(1) & 0xFF
+            if keyboard.is_pressed('q') or key_in == ord('q'):
                 IS_RUNNING = False
                 force_release_all_keys()
+                cv2.destroyAllWindows()
                 break
 
             bbox = get_window_bbox(PROCESS_NAME)
             if not bbox:
-                time.sleep(1)
                 continue
 
             img = np.array(sct.grab(bbox))
@@ -217,9 +215,53 @@ def auto_fishing():
             slider_img = img_1080p[y:y+h, x:x+w]
             hsv_slider = cv2.cvtColor(slider_img, cv2.COLOR_BGR2HSV)
 
-            green_min_x, green_max_x = find_green_bounds_x(hsv_slider)
-            yellow_x = find_yellow_center_x(hsv_slider)
+            # ======== 掩模处理及结构判定过滤 ========
+            mask_green = cv2.inRange(hsv_slider, GREEN_LOWER, GREEN_UPPER)
+            
+            # 第一步：用闭运算链接截断面
+            if MORPH_KERNEL_SIZE > 0:
+                kernel = np.ones((MORPH_KERNEL_SIZE, MORPH_KERNEL_SIZE), np.uint8)
+                mask_green = cv2.morphologyEx(mask_green, cv2.MORPH_CLOSE, kernel)
+            
+            # 第二步：依据配置好的基线（GREEN_MIN_AREA）彻底抛除掉体积不过关的光斑污染并投产白底模型
+            contours_g, _ = cv2.findContours(mask_green, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            clean_mask_green = np.zeros_like(mask_green)
+            for cg in contours_g:
+                if cv2.contourArea(cg) > GREEN_MIN_AREA:
+                    cv2.drawContours(clean_mask_green, [cg], -1, 255, -1)
+            mask_green = clean_mask_green
+            
+            # 独立对钩索点特征分离提取
+            mask_yellow = cv2.inRange(hsv_slider, YELLOW_LOWER, YELLOW_UPPER)
+            # ========================================
+
+            green_min_x, green_max_x = find_green_bounds_from_mask(mask_green)
+            yellow_x = find_yellow_center_from_mask(mask_yellow)
+            
+            # ========= 生成诊断级 UI 回显图层 =========
+            debug_view = slider_img.copy()
+            if green_min_x is not None:
+                cv2.rectangle(debug_view, (green_min_x, 0), (green_max_x, h-1), (0, 255, 0), 1)
+            if yellow_x is not None:
+                cv2.line(debug_view, (yellow_x, 0), (yellow_x, h-1), (0, 255, 255), 1)
+
+            vis_stack = np.vstack((
+                debug_view, 
+                cv2.cvtColor(mask_green, cv2.COLOR_GRAY2BGR),
+                cv2.cvtColor(mask_yellow, cv2.COLOR_GRAY2BGR)
+            ))
+            cv2.imshow("Debug Vision", vis_stack)
+
             curr_time = time.time()
+            
+            if curr_time - state_start_time > STATE_TIMEOUT:
+                state_start_time = curr_time  
+                print(f"[警告清理] 控制阶段超过限定寿命时长限制，还原按层。")
+                force_release_all_keys()
+                switch_key(None)
+                if state == "REELING":
+                    state = "IDLE"  
+                continue 
 
             if state == "IDLE":
                 if green_min_x is not None:
@@ -263,11 +305,9 @@ def auto_fishing():
 
                     if miss_frames > 15: 
                         switch_key(None)
-                        force_release_all_keys() 
-                        time.sleep(1) 
+                        force_release_all_keys()
                         state = "IDLE"
-
-            time.sleep(0.002)
+                        state_start_time = curr_time
 
 if __name__ == "__main__":
     auto_fishing()
