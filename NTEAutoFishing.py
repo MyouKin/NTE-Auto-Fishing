@@ -22,7 +22,7 @@ except AttributeError:
         pass
 
 pydirectinput.PAUSE = 0  
-pydirectinput.FAILSAFE = False  # [关键修复] 彻底关闭防呆机制，防止意外鼠标移动抛出异常导致跳过释放指令
+pydirectinput.FAILSAFE = False  
 
 # ======================= 配置区 =======================
 PROCESS_NAME = "HTGame.exe"
@@ -43,10 +43,11 @@ MORPH_KERNEL_SIZE = 21
 
 GREEN_MIN_AREA = 1400
 
-STATE_TIMEOUT = 20.0   
+STATE_TIMEOUT = 20.0   # 钓鱼状态下的防卡死超时时长
+IDLE_TIMEOUT = 10.0    # 闲置等待状态下的定期重置循环时长
 IS_RUNNING = False
 
-CLICK_RANDOM_OFFSET = 100
+CLICK_RANDOM_OFFSET = 100 
 # ======================================================
 
 VK_CODE = {
@@ -123,10 +124,20 @@ def simulate_keyup(key):
         pydirectinput.keyUp(key)
 
 def force_release_all_keys():
+    # 释放 AD 方向键
     simulate_keyup(KEY_LEFT)
     simulate_keyup(KEY_RIGHT)
-    # 追加全局点击强制释放兜底
-    if not BACKGROUND_MODE:
+    
+    # 释放 F键 与 鼠标左键
+    if BACKGROUND_MODE:
+        hwnd = get_hwnd_by_process_name(PROCESS_NAME)
+        if hwnd:
+            try:
+                win32api.PostMessage(hwnd, win32con.WM_KEYUP, VK_CODE['f'], 0)
+                win32api.PostMessage(hwnd, win32con.WM_LBUTTONUP, 0, 0)
+            except:
+                pass
+    else:
         try:
             pydirectinput.keyUp('f')
             pydirectinput.mouseUp(button='left')
@@ -144,8 +155,29 @@ def auto_fishing():
     print("开始执行，可随时按 Q 键停止。")
     IS_RUNNING = True
     
-    def _click_spammer_thread():
-        while IS_RUNNING:
+    state = "IDLE"
+    state_start_time = time.time() 
+    current_held_key = None
+    
+    miss_frames = 0
+    smooth_green_vel = 0.0
+    last_green_center = None
+    last_valid_time = 0.0
+    spammer_thread_id = 0
+
+    cv2.namedWindow("Debug Vision", cv2.WINDOW_NORMAL)
+    cv2.resizeWindow("Debug Vision", SLIDER_ROI[2] * 2, SLIDER_ROI[3] * 6)
+
+    def switch_key(new_key):
+        nonlocal current_held_key
+        if current_held_key != new_key:
+            if current_held_key is not None: simulate_keyup(current_held_key)
+            if new_key is not None: simulate_keydown(new_key)
+            current_held_key = new_key
+
+    def _click_spammer_thread(thread_id):
+        # 加入 thread_id 判断，当外部发起重置导致 ID 更新时，旧线程自动销毁
+        while IS_RUNNING and spammer_thread_id == thread_id:
             hwnd = get_hwnd_by_process_name(PROCESS_NAME)
             if hwnd:
                 try:
@@ -158,72 +190,80 @@ def auto_fishing():
                         rand_x = (rect[2] // 2) + random.randint(-CLICK_RANDOM_OFFSET, CLICK_RANDOM_OFFSET)
                         rand_y = (rect[3] // 2) + random.randint(-CLICK_RANDOM_OFFSET, CLICK_RANDOM_OFFSET)
                         center_lparam = win32api.MAKELONG(rand_x, rand_y)
-                        
-                        win32api.PostMessage(hwnd, win32con.WM_KEYDOWN, VK_CODE['f'], 0)
-                        time.sleep(0.1)
-                        win32api.PostMessage(hwnd, win32con.WM_KEYUP, VK_CODE['f'], 0)
-                        
-                        time.sleep(0.15)
-                        
-                        win32api.PostMessage(hwnd, win32con.WM_LBUTTONDOWN, win32con.MK_LBUTTON, center_lparam)
-                        time.sleep(0.1)
-                        win32api.PostMessage(hwnd, win32con.WM_LBUTTONUP, 0, center_lparam)
                     else:
                         point = win32gui.ClientToScreen(hwnd, (0, 0))
                         abs_x = point[0] + (rect[2] // 2) + random.randint(-CLICK_RANDOM_OFFSET, CLICK_RANDOM_OFFSET)
                         abs_y = point[1] + (rect[3] // 2) + random.randint(-CLICK_RANDOM_OFFSET, CLICK_RANDOM_OFFSET)
+
+                    if BACKGROUND_MODE:
+                        try:
+                            win32api.PostMessage(hwnd, win32con.WM_KEYDOWN, VK_CODE['f'], 0)
+                        finally:
+                            time.sleep(0.1)  
+                            win32api.PostMessage(hwnd, win32con.WM_KEYUP, VK_CODE['f'], 0)
                         
-                        pydirectinput.keyDown('f')
-                        time.sleep(0.1)
-                        pydirectinput.keyUp('f')
+                        time.sleep(0.15) 
                         
+                        try:
+                            win32api.PostMessage(hwnd, win32con.WM_LBUTTONDOWN, win32con.MK_LBUTTON, center_lparam)
+                        finally:
+                            time.sleep(0.1) 
+                            win32api.PostMessage(hwnd, win32con.WM_LBUTTONUP, 0, center_lparam)
+                            
+                    else:
+                        try:
+                            pydirectinput.keyDown('f')
+                        finally:
+                            time.sleep(0.1)
+                            pydirectinput.keyUp('f')
+                            
                         time.sleep(0.15)
                         
                         pydirectinput.moveTo(abs_x, abs_y)
-                        pydirectinput.mouseDown(button='left')
-                        time.sleep(0.1)
-                        pydirectinput.mouseUp(button='left')
                         
-                except Exception:
-                    # [关键修复] 当任何代码执行引发异常时，在此处执行强制抬键以规避物理锁死
-                    if not BACKGROUND_MODE:
                         try:
-                            pydirectinput.keyUp('f')
+                            pydirectinput.mouseDown(button='left')
+                        finally:
+                            time.sleep(0.1)
                             pydirectinput.mouseUp(button='left')
-                        except:
-                            pass
-            time.sleep(0.3) 
-            
-    threading.Thread(target=_click_spammer_thread, daemon=True).start()
+                            
+                except Exception:
+                    # 发生异常时由 force_release_all_keys 统一处理兜底
+                    pass
+            time.sleep(0.3)
 
-    state = "IDLE"
-    state_start_time = time.time() 
-    current_held_key = None
-    
-    miss_frames = 0
-    smooth_green_vel = 0.0
-    last_green_center = None
-    last_valid_time = 0.0
-
-    cv2.namedWindow("Debug Vision", cv2.WINDOW_NORMAL)
-    cv2.resizeWindow("Debug Vision", SLIDER_ROI[2] * 2, SLIDER_ROI[3] * 6)
-
-    def switch_key(new_key):
-        nonlocal current_held_key
-        if current_held_key != new_key:
-            if current_held_key is not None: simulate_keyup(current_held_key)
-            if new_key is not None: simulate_keydown(new_key)
-            current_held_key = new_key
-
-    def init_fishing_control(first_green_center):
+    def full_system_reset(reset_type="CYCLE"):
         nonlocal miss_frames, smooth_green_vel, last_green_center, last_valid_time, current_held_key, state_start_time
+        nonlocal spammer_thread_id, state
+        
+        # 1. 废弃旧线程
+        spammer_thread_id += 1
+        current_id = spammer_thread_id
+        
+        # 2. 清理所有物理按键残留状态
+        force_release_all_keys()
+        switch_key(None)
+        
+        # 3. 重置全部程序追踪状态参数
+        state = "IDLE"
         miss_frames = 0
         smooth_green_vel = 0.0
-        last_green_center = first_green_center
+        last_green_center = None
         last_valid_time = time.time()
         state_start_time = time.time()
-        force_release_all_keys()
         current_held_key = None
+        
+        # 4. 创建全新的干净线程接管
+        threading.Thread(target=_click_spammer_thread, args=(current_id,), daemon=True).start()
+        
+        if reset_type == "TIMEOUT":
+            print(f"[日志] 触发超时机制，所有驱动进程与状态已重置")
+        elif reset_type == "CYCLE":
+            pass  # 常规流程重置不额外输出日志
+            # print(f"[日志] 完成本轮流程，执行线程驱动与按键层级刷新")
+
+    # 首次启动线程与系统初始化
+    full_system_reset("START")
 
     with mss.mss() as sct:
         while True:
@@ -279,20 +319,23 @@ def auto_fishing():
 
             curr_time = time.time()
             
+            # 定时兜底：若长期保持状态不流转，进行全盘初始化
             if state == "REELING" and (curr_time - state_start_time > STATE_TIMEOUT):
-                print(f"[日志] 操作超过阈值限额，回收至重置段位")
-                state_start_time = curr_time  
-                force_release_all_keys()
-                switch_key(None)
-                state = "IDLE"  
+                full_system_reset("TIMEOUT")
                 continue 
+            elif state == "IDLE" and (curr_time - state_start_time > IDLE_TIMEOUT):
+                full_system_reset("TIMEOUT")
+                continue
             
             if state == "IDLE":
                 if green_min_x is not None:
-                    green_center_x = (green_min_x + green_max_x) // 2
-                    init_fishing_control(green_center_x)
+                    # 进入控鱼状态，仅初始化运算参数而不重启线程
+                    miss_frames = 0
+                    smooth_green_vel = 0.0
+                    last_green_center = (green_min_x + green_max_x) // 2
+                    last_valid_time = time.time()
+                    
                     state = "REELING"
-                else:
                     state_start_time = curr_time
 
             elif state == "REELING":
@@ -329,11 +372,9 @@ def auto_fishing():
                     miss_frames += 1
                     switch_key(None)
 
-                    if miss_frames > 15: 
-                        switch_key(None)
-                        force_release_all_keys()
-                        state = "IDLE"
-                        state_start_time = curr_time
+                    # 当检测不到绿色目标帧数累积上限，判断本轮控鱼已结束
+                    if miss_frames > 10: 
+                        full_system_reset("CYCLE")
 
 if __name__ == "__main__":
     auto_fishing()
