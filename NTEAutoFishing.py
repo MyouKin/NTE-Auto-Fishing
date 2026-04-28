@@ -11,6 +11,7 @@ import win32process
 import psutil
 import ctypes
 import threading
+import random  # 新增引用用于执行随机游移取值
 
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(2)
@@ -35,14 +36,16 @@ YELLOW_UPPER = np.array([60, 160, 255])
 
 KEY_LEFT = 'a'
 KEY_RIGHT = 'd'
-CENTER_TOLERANCE = 5
+CENTER_TOLERANCE = 3
 PREDICT_TIME = 0.08      
 MORPH_KERNEL_SIZE = 21
 
-GREEN_MIN_AREA = 1400
+GREEN_MIN_AREA = 1500
 
 STATE_TIMEOUT = 20.0   
 IS_RUNNING = False
+
+CLICK_RANDOM_OFFSET = 100  # 设立控制中心浮移上下差量最大偏差值
 # ======================================================
 
 VK_CODE = {
@@ -133,7 +136,6 @@ def auto_fishing():
     print("开始执行，可随时按 Q 键停止。")
     IS_RUNNING = True
     
-    # 彻底解耦循环动作线程并拉升时长以免疫画面跳帧引发的指令失踪
     def _click_spammer_thread():
         while IS_RUNNING:
             hwnd = get_hwnd_by_process_name(PROCESS_NAME)
@@ -141,14 +143,16 @@ def auto_fishing():
                 try:
                     if BACKGROUND_MODE:
                         win32api.PostMessage(hwnd, win32con.WM_KEYDOWN, VK_CODE['f'], 0)
-                        time.sleep(0.1)  # 避免因客户端延迟导致的按压判断忽略
+                        time.sleep(0.1)  
                         win32api.PostMessage(hwnd, win32con.WM_KEYUP, VK_CODE['f'], 0)
                         
-                        time.sleep(0.1) 
+                        time.sleep(0.15) 
                         
                         rect = win32gui.GetClientRect(hwnd)
                         if rect[2] > 0 and rect[3] > 0:
-                            center_lparam = win32api.MAKELONG(rect[2] // 2, rect[3] // 2)
+                            rand_x = (rect[2] // 2) + random.randint(-CLICK_RANDOM_OFFSET, CLICK_RANDOM_OFFSET)
+                            rand_y = (rect[3] // 2) + random.randint(-CLICK_RANDOM_OFFSET, CLICK_RANDOM_OFFSET)
+                            center_lparam = win32api.MAKELONG(rand_x, rand_y)
                             win32api.PostMessage(hwnd, win32con.WM_LBUTTONDOWN, win32con.MK_LBUTTON, center_lparam)
                             time.sleep(0.1) 
                             win32api.PostMessage(hwnd, win32con.WM_LBUTTONUP, 0, center_lparam)
@@ -156,13 +160,22 @@ def auto_fishing():
                         pydirectinput.keyDown('f')
                         time.sleep(0.1)
                         pydirectinput.keyUp('f')
-                        time.sleep(0.1)
+                        
+                        time.sleep(0.15)
+                        
+                        rect = win32gui.GetClientRect(hwnd)
+                        point = win32gui.ClientToScreen(hwnd, (0, 0))
+                        if rect[2] > 0 and rect[3] > 0:
+                            abs_x = point[0] + (rect[2] // 2) + random.randint(-CLICK_RANDOM_OFFSET, CLICK_RANDOM_OFFSET)
+                            abs_y = point[1] + (rect[3] // 2) + random.randint(-CLICK_RANDOM_OFFSET, CLICK_RANDOM_OFFSET)
+                            pydirectinput.moveTo(abs_x, abs_y)
+
                         pydirectinput.mouseDown(button='left')
                         time.sleep(0.1)
                         pydirectinput.mouseUp(button='left')
                 except Exception:
                     pass
-            time.sleep(0.4) 
+            time.sleep(0.3) 
             
     threading.Thread(target=_click_spammer_thread, daemon=True).start()
 
@@ -249,7 +262,6 @@ def auto_fishing():
 
             curr_time = time.time()
             
-            # 超时机制只约束在非空闲控制期执行清理判断，不再重复引发提示误区
             if state == "REELING" and (curr_time - state_start_time > STATE_TIMEOUT):
                 print(f"[日志] 操作超过阈值限额，回收至重置段位")
                 state_start_time = curr_time  
@@ -263,7 +275,6 @@ def auto_fishing():
                     green_center_x = (green_min_x + green_max_x) // 2
                     init_fishing_control(green_center_x)
                     state = "REELING"
-                    # 返回待命点刷新一次时间基准值避免计算断层
                 else:
                     state_start_time = curr_time
 
