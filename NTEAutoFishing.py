@@ -35,12 +35,11 @@ YELLOW_UPPER = np.array([60, 160, 255])
 
 KEY_LEFT = 'a'
 KEY_RIGHT = 'd'
-CENTER_TOLERANCE = 3
+CENTER_TOLERANCE = 5
 PREDICT_TIME = 0.08      
 MORPH_KERNEL_SIZE = 21
 
-# 新增面积噪音限制设定
-GREEN_MIN_AREA = 1500
+GREEN_MIN_AREA = 1400
 
 STATE_TIMEOUT = 20.0   
 IS_RUNNING = False
@@ -100,7 +99,6 @@ def find_yellow_center_from_mask(mask):
     return None
 
 def find_green_bounds_from_mask(mask):
-    # 此处接收到的 mask 在函数外已提前完成了高低画面的全面面积清算（保留的必定有效），只需负责获取界限极点。
     x_coords = np.where(mask > 0)[1]
     if len(x_coords) > 0: 
         return int(np.min(x_coords)), int(np.max(x_coords))
@@ -120,26 +118,6 @@ def simulate_keyup(key):
     else:
         pydirectinput.keyUp(key)
 
-def simulate_press(key):
-    hwnd = get_hwnd_by_process_name(PROCESS_NAME)
-    if BACKGROUND_MODE and hwnd:
-        win32api.PostMessage(hwnd, win32con.WM_KEYDOWN, VK_CODE.get(key, 0), 0)
-        time.sleep(0.05)
-        win32api.PostMessage(hwnd, win32con.WM_KEYUP, VK_CODE.get(key, 0), 0)
-    else:
-        pydirectinput.press(key)
-
-def simulate_left_click():
-    hwnd = get_hwnd_by_process_name(PROCESS_NAME)
-    if BACKGROUND_MODE and hwnd:
-        rect = win32gui.GetClientRect(hwnd)
-        center_lparam = win32api.MAKELONG(rect[2] // 2, rect[3] // 2)
-        win32api.PostMessage(hwnd, win32con.WM_LBUTTONDOWN, win32con.MK_LBUTTON, center_lparam)
-        time.sleep(0.05)
-        win32api.PostMessage(hwnd, win32con.WM_LBUTTONUP, 0, center_lparam)
-    else:
-        pydirectinput.click()
-
 def force_release_all_keys():
     simulate_keyup(KEY_LEFT)
     simulate_keyup(KEY_RIGHT)
@@ -152,16 +130,39 @@ def auto_fishing():
         time.sleep(1)
         if keyboard.is_pressed('q'): return
 
-    print("启动运作...按 Q (也可在监视窗激活时)结束执行。")
+    print("开始执行，可随时按 Q 键停止。")
     IS_RUNNING = True
     
+    # 彻底解耦循环动作线程并拉升时长以免疫画面跳帧引发的指令失踪
     def _click_spammer_thread():
         while IS_RUNNING:
-            if get_hwnd_by_process_name(PROCESS_NAME):
-                simulate_press('f')
-                time.sleep(0.05)
-                simulate_left_click()
-            time.sleep(0.2)  
+            hwnd = get_hwnd_by_process_name(PROCESS_NAME)
+            if hwnd:
+                try:
+                    if BACKGROUND_MODE:
+                        win32api.PostMessage(hwnd, win32con.WM_KEYDOWN, VK_CODE['f'], 0)
+                        time.sleep(0.1)  # 避免因客户端延迟导致的按压判断忽略
+                        win32api.PostMessage(hwnd, win32con.WM_KEYUP, VK_CODE['f'], 0)
+                        
+                        time.sleep(0.1) 
+                        
+                        rect = win32gui.GetClientRect(hwnd)
+                        if rect[2] > 0 and rect[3] > 0:
+                            center_lparam = win32api.MAKELONG(rect[2] // 2, rect[3] // 2)
+                            win32api.PostMessage(hwnd, win32con.WM_LBUTTONDOWN, win32con.MK_LBUTTON, center_lparam)
+                            time.sleep(0.1) 
+                            win32api.PostMessage(hwnd, win32con.WM_LBUTTONUP, 0, center_lparam)
+                    else:
+                        pydirectinput.keyDown('f')
+                        time.sleep(0.1)
+                        pydirectinput.keyUp('f')
+                        time.sleep(0.1)
+                        pydirectinput.mouseDown(button='left')
+                        time.sleep(0.1)
+                        pydirectinput.mouseUp(button='left')
+                except Exception:
+                    pass
+            time.sleep(0.4) 
             
     threading.Thread(target=_click_spammer_thread, daemon=True).start()
 
@@ -215,15 +216,12 @@ def auto_fishing():
             slider_img = img_1080p[y:y+h, x:x+w]
             hsv_slider = cv2.cvtColor(slider_img, cv2.COLOR_BGR2HSV)
 
-            # ======== 掩模处理及结构判定过滤 ========
             mask_green = cv2.inRange(hsv_slider, GREEN_LOWER, GREEN_UPPER)
             
-            # 第一步：用闭运算链接截断面
             if MORPH_KERNEL_SIZE > 0:
                 kernel = np.ones((MORPH_KERNEL_SIZE, MORPH_KERNEL_SIZE), np.uint8)
                 mask_green = cv2.morphologyEx(mask_green, cv2.MORPH_CLOSE, kernel)
             
-            # 第二步：依据配置好的基线（GREEN_MIN_AREA）彻底抛除掉体积不过关的光斑污染并投产白底模型
             contours_g, _ = cv2.findContours(mask_green, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             clean_mask_green = np.zeros_like(mask_green)
             for cg in contours_g:
@@ -231,14 +229,11 @@ def auto_fishing():
                     cv2.drawContours(clean_mask_green, [cg], -1, 255, -1)
             mask_green = clean_mask_green
             
-            # 独立对钩索点特征分离提取
             mask_yellow = cv2.inRange(hsv_slider, YELLOW_LOWER, YELLOW_UPPER)
-            # ========================================
 
             green_min_x, green_max_x = find_green_bounds_from_mask(mask_green)
             yellow_x = find_yellow_center_from_mask(mask_yellow)
             
-            # ========= 生成诊断级 UI 回显图层 =========
             debug_view = slider_img.copy()
             if green_min_x is not None:
                 cv2.rectangle(debug_view, (green_min_x, 0), (green_max_x, h-1), (0, 255, 0), 1)
@@ -254,20 +249,23 @@ def auto_fishing():
 
             curr_time = time.time()
             
-            if curr_time - state_start_time > STATE_TIMEOUT:
+            # 超时机制只约束在非空闲控制期执行清理判断，不再重复引发提示误区
+            if state == "REELING" and (curr_time - state_start_time > STATE_TIMEOUT):
+                print(f"[日志] 操作超过阈值限额，回收至重置段位")
                 state_start_time = curr_time  
-                print(f"[警告清理] 控制阶段超过限定寿命时长限制，还原按层。")
                 force_release_all_keys()
                 switch_key(None)
-                if state == "REELING":
-                    state = "IDLE"  
+                state = "IDLE"  
                 continue 
-
+            
             if state == "IDLE":
                 if green_min_x is not None:
                     green_center_x = (green_min_x + green_max_x) // 2
                     init_fishing_control(green_center_x)
                     state = "REELING"
+                    # 返回待命点刷新一次时间基准值避免计算断层
+                else:
+                    state_start_time = curr_time
 
             elif state == "REELING":
                 if green_min_x is not None and yellow_x is not None:
