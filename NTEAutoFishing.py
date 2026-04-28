@@ -11,7 +11,7 @@ import win32process
 import psutil
 import ctypes
 import threading
-import random  # 新增引用用于执行随机游移取值
+import random 
 
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(2)
@@ -22,6 +22,7 @@ except AttributeError:
         pass
 
 pydirectinput.PAUSE = 0  
+pydirectinput.FAILSAFE = False  # [关键修复] 彻底关闭防呆机制，防止意外鼠标移动抛出异常导致跳过释放指令
 
 # ======================= 配置区 =======================
 PROCESS_NAME = "HTGame.exe"
@@ -36,16 +37,16 @@ YELLOW_UPPER = np.array([60, 160, 255])
 
 KEY_LEFT = 'a'
 KEY_RIGHT = 'd'
-CENTER_TOLERANCE = 3
+CENTER_TOLERANCE = 5
 PREDICT_TIME = 0.08      
 MORPH_KERNEL_SIZE = 21
 
-GREEN_MIN_AREA = 1500
+GREEN_MIN_AREA = 1400
 
 STATE_TIMEOUT = 20.0   
 IS_RUNNING = False
 
-CLICK_RANDOM_OFFSET = 100  # 设立控制中心浮移上下差量最大偏差值
+CLICK_RANDOM_OFFSET = 100
 # ======================================================
 
 VK_CODE = {
@@ -124,6 +125,13 @@ def simulate_keyup(key):
 def force_release_all_keys():
     simulate_keyup(KEY_LEFT)
     simulate_keyup(KEY_RIGHT)
+    # 追加全局点击强制释放兜底
+    if not BACKGROUND_MODE:
+        try:
+            pydirectinput.keyUp('f')
+            pydirectinput.mouseUp(button='left')
+        except:
+            pass
 
 def auto_fishing():
     global IS_RUNNING
@@ -141,40 +149,49 @@ def auto_fishing():
             hwnd = get_hwnd_by_process_name(PROCESS_NAME)
             if hwnd:
                 try:
+                    rect = win32gui.GetClientRect(hwnd)
+                    if rect[2] <= 0 or rect[3] <= 0:
+                        time.sleep(0.4)
+                        continue
+
                     if BACKGROUND_MODE:
+                        rand_x = (rect[2] // 2) + random.randint(-CLICK_RANDOM_OFFSET, CLICK_RANDOM_OFFSET)
+                        rand_y = (rect[3] // 2) + random.randint(-CLICK_RANDOM_OFFSET, CLICK_RANDOM_OFFSET)
+                        center_lparam = win32api.MAKELONG(rand_x, rand_y)
+                        
                         win32api.PostMessage(hwnd, win32con.WM_KEYDOWN, VK_CODE['f'], 0)
-                        time.sleep(0.1)  
+                        time.sleep(0.1)
                         win32api.PostMessage(hwnd, win32con.WM_KEYUP, VK_CODE['f'], 0)
                         
-                        time.sleep(0.15) 
+                        time.sleep(0.15)
                         
-                        rect = win32gui.GetClientRect(hwnd)
-                        if rect[2] > 0 and rect[3] > 0:
-                            rand_x = (rect[2] // 2) + random.randint(-CLICK_RANDOM_OFFSET, CLICK_RANDOM_OFFSET)
-                            rand_y = (rect[3] // 2) + random.randint(-CLICK_RANDOM_OFFSET, CLICK_RANDOM_OFFSET)
-                            center_lparam = win32api.MAKELONG(rand_x, rand_y)
-                            win32api.PostMessage(hwnd, win32con.WM_LBUTTONDOWN, win32con.MK_LBUTTON, center_lparam)
-                            time.sleep(0.1) 
-                            win32api.PostMessage(hwnd, win32con.WM_LBUTTONUP, 0, center_lparam)
+                        win32api.PostMessage(hwnd, win32con.WM_LBUTTONDOWN, win32con.MK_LBUTTON, center_lparam)
+                        time.sleep(0.1)
+                        win32api.PostMessage(hwnd, win32con.WM_LBUTTONUP, 0, center_lparam)
                     else:
+                        point = win32gui.ClientToScreen(hwnd, (0, 0))
+                        abs_x = point[0] + (rect[2] // 2) + random.randint(-CLICK_RANDOM_OFFSET, CLICK_RANDOM_OFFSET)
+                        abs_y = point[1] + (rect[3] // 2) + random.randint(-CLICK_RANDOM_OFFSET, CLICK_RANDOM_OFFSET)
+                        
                         pydirectinput.keyDown('f')
                         time.sleep(0.1)
                         pydirectinput.keyUp('f')
                         
                         time.sleep(0.15)
                         
-                        rect = win32gui.GetClientRect(hwnd)
-                        point = win32gui.ClientToScreen(hwnd, (0, 0))
-                        if rect[2] > 0 and rect[3] > 0:
-                            abs_x = point[0] + (rect[2] // 2) + random.randint(-CLICK_RANDOM_OFFSET, CLICK_RANDOM_OFFSET)
-                            abs_y = point[1] + (rect[3] // 2) + random.randint(-CLICK_RANDOM_OFFSET, CLICK_RANDOM_OFFSET)
-                            pydirectinput.moveTo(abs_x, abs_y)
-
+                        pydirectinput.moveTo(abs_x, abs_y)
                         pydirectinput.mouseDown(button='left')
                         time.sleep(0.1)
                         pydirectinput.mouseUp(button='left')
+                        
                 except Exception:
-                    pass
+                    # [关键修复] 当任何代码执行引发异常时，在此处执行强制抬键以规避物理锁死
+                    if not BACKGROUND_MODE:
+                        try:
+                            pydirectinput.keyUp('f')
+                            pydirectinput.mouseUp(button='left')
+                        except:
+                            pass
             time.sleep(0.3) 
             
     threading.Thread(target=_click_spammer_thread, daemon=True).start()
