@@ -1,7 +1,6 @@
 import cv2
 import numpy as np
 import mss
-import pydirectinput
 import keyboard
 import time
 import win32gui
@@ -11,7 +10,6 @@ import win32process
 import psutil
 import ctypes
 import threading
-import random 
 
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(2)
@@ -21,14 +19,9 @@ except AttributeError:
     except:
         pass
 
-pydirectinput.PAUSE = 0  
-pydirectinput.FAILSAFE = False  
-
 # ======================= 配置区 =======================
 PROCESS_NAME = "HTGame.exe"
-BACKGROUND_MODE = True  
 
-# [新增] 调试窗口开关，设为 True 会显示绿条和黄点的实时掩膜捕获画面
 SHOW_DEBUG_VISION = False
 
 SLIDER_ROI = (608, 65, 713, 20)
@@ -48,9 +41,6 @@ GREEN_MIN_AREA = 1400
 
 STATE_TIMEOUT = 20.0   
 IDLE_TIMEOUT = 10.0    
-IS_RUNNING = False
-
-CLICK_RANDOM_OFFSET = 100 
 # ======================================================
 
 VK_CODE = {
@@ -114,114 +104,93 @@ def find_green_bounds_from_mask(mask):
 
 def simulate_keydown(key):
     hwnd = get_hwnd_by_process_name(PROCESS_NAME)
-    if BACKGROUND_MODE and hwnd:
+    if hwnd:
         win32api.PostMessage(hwnd, win32con.WM_KEYDOWN, VK_CODE.get(key, 0), 0)
-    else:
-        pydirectinput.keyDown(key)
 
 def simulate_keyup(key):
     hwnd = get_hwnd_by_process_name(PROCESS_NAME)
-    if BACKGROUND_MODE and hwnd:
+    if hwnd:
         win32api.PostMessage(hwnd, win32con.WM_KEYUP, VK_CODE.get(key, 0), 0)
-    else:
-        pydirectinput.keyUp(key)
 
 def force_release_all_keys():
     simulate_keyup(KEY_LEFT)
     simulate_keyup(KEY_RIGHT)
-    
-    if BACKGROUND_MODE:
-        hwnd = get_hwnd_by_process_name(PROCESS_NAME)
-        if hwnd:
-            try:
-                win32api.PostMessage(hwnd, win32con.WM_KEYUP, VK_CODE['f'], 0)
-                win32api.PostMessage(hwnd, win32con.WM_LBUTTONUP, 0, 0)
-            except:
-                pass
-    else:
+    hwnd = get_hwnd_by_process_name(PROCESS_NAME)
+    if hwnd:
         try:
-            pydirectinput.keyUp('f')
-            pydirectinput.mouseUp(button='left')
-        except:
+            win32api.PostMessage(hwnd, win32con.WM_KEYUP, VK_CODE['f'], 0)
+            win32api.PostMessage(hwnd, win32con.WM_LBUTTONUP, 0, 0)
+        except Exception:
+            pass
+
+def refresh_window_focus(hwnd):
+    """发送底层消息模拟窗口失去焦点与重新获取焦点，唤醒输入挂起"""
+    if hwnd:
+        try:
+            # 模拟失去焦点
+            win32api.PostMessage(hwnd, win32con.WM_ACTIVATE, win32con.WA_INACTIVE, 0)
+            win32api.PostMessage(hwnd, win32con.WM_KILLFOCUS, 0, 0)
+            time.sleep(0.1)
+            # 模拟获得焦点
+            win32api.PostMessage(hwnd, win32con.WM_ACTIVATE, win32con.WA_ACTIVE, 0)
+            win32api.PostMessage(hwnd, win32con.WM_SETFOCUS, 0, 0)
+        except Exception:
             pass
 
 def auto_fishing():
-    """执行单次生命周期的主控逻辑，触发重启条件时 return 退出"""
-    global IS_RUNNING, _cached_hwnd
-    
+    global _cached_hwnd
     _cached_hwnd = None 
     
     while get_window_bbox(PROCESS_NAME) is None:
         time.sleep(1)
         if keyboard.is_pressed('q'): return "QUIT"
 
-    IS_RUNNING = True
+    hwnd = get_hwnd_by_process_name(PROCESS_NAME)
+    if hwnd:
+        refresh_window_focus(hwnd)
+        
+    thread_running = [True]
     
     def _click_spammer_thread():
-        while IS_RUNNING:
-            hwnd = get_hwnd_by_process_name(PROCESS_NAME)
-            if hwnd:
+        while thread_running[0]:
+            try:
+                hwnd_t = get_hwnd_by_process_name(PROCESS_NAME)
+                if not hwnd_t:
+                    time.sleep(0.5)
+                    continue
+
+                rect = win32gui.GetClientRect(hwnd_t)
+                if rect[2] <= 0 or rect[3] <= 0:
+                    time.sleep(0.4)
+                    continue
+
+                center_lparam = win32api.MAKELONG(rect[2] // 2, rect[3] // 2)
+
                 try:
-                    rect = win32gui.GetClientRect(hwnd)
-                    if rect[2] <= 0 or rect[3] <= 0:
-                        time.sleep(0.4)
-                        continue
-
-                    if BACKGROUND_MODE:
-                        rand_x = (rect[2] // 2) + random.randint(-CLICK_RANDOM_OFFSET, CLICK_RANDOM_OFFSET)
-                        rand_y = (rect[3] // 2) + random.randint(-CLICK_RANDOM_OFFSET, CLICK_RANDOM_OFFSET)
-                        center_lparam = win32api.MAKELONG(rand_x, rand_y)
-                    else:
-                        point = win32gui.ClientToScreen(hwnd, (0, 0))
-                        abs_x = point[0] + (rect[2] // 2) + random.randint(-CLICK_RANDOM_OFFSET, CLICK_RANDOM_OFFSET)
-                        abs_y = point[1] + (rect[3] // 2) + random.randint(-CLICK_RANDOM_OFFSET, CLICK_RANDOM_OFFSET)
-
-                    if BACKGROUND_MODE:
-                        try:
-                            win32api.PostMessage(hwnd, win32con.WM_KEYDOWN, VK_CODE['f'], 0)
-                        finally:
-                            time.sleep(0.1)  
-                            win32api.PostMessage(hwnd, win32con.WM_KEYUP, VK_CODE['f'], 0)
-                        
-                        time.sleep(0.15) 
-                        
-                        try:
-                            win32api.PostMessage(hwnd, win32con.WM_LBUTTONDOWN, win32con.MK_LBUTTON, center_lparam)
-                        finally:
-                            time.sleep(0.1) 
-                            win32api.PostMessage(hwnd, win32con.WM_LBUTTONUP, 0, center_lparam)
-                            
-                    else:
-                        try:
-                            pydirectinput.keyDown('f')
-                        finally:
-                            time.sleep(0.1)
-                            pydirectinput.keyUp('f')
-                            
-                        time.sleep(0.15)
-                        
-                        pydirectinput.moveTo(abs_x, abs_y)
-                        
-                        try:
-                            pydirectinput.mouseDown(button='left')
-                        finally:
-                            time.sleep(0.1)
-                            pydirectinput.mouseUp(button='left')
-                            
-                except Exception:
-                    pass
+                    win32api.PostMessage(hwnd_t, win32con.WM_KEYDOWN, VK_CODE['f'], 0)
+                finally:
+                    time.sleep(0.1)  
+                    win32api.PostMessage(hwnd_t, win32con.WM_KEYUP, VK_CODE['f'], 0)
+                
+                time.sleep(0.1) 
+                
+                try:
+                    win32api.PostMessage(hwnd_t, win32con.WM_LBUTTONDOWN, win32con.MK_LBUTTON, center_lparam)
+                finally:
+                    time.sleep(0.1) 
+                    win32api.PostMessage(hwnd_t, win32con.WM_LBUTTONUP, 0, center_lparam)
+                    
+            except Exception:
+                pass
             time.sleep(0.3)
-
+            
     threading.Thread(target=_click_spammer_thread, daemon=True).start()
 
     state = "IDLE"
     state_start_time = time.time() 
     current_held_key = None
-    
-    miss_frames = 0
-    smooth_green_vel = 0.0
-    last_green_center = None
     last_valid_time = time.time()
+    last_green_center = None
 
     if SHOW_DEBUG_VISION:
         cv2.namedWindow("Debug Vision", cv2.WINDOW_NORMAL)
@@ -237,7 +206,6 @@ def auto_fishing():
     try:
         with mss.mss() as sct:
             while True:
-                # 根据配置决定是否抓取 OpenCV 窗口热键
                 if SHOW_DEBUG_VISION:
                     key_in = cv2.waitKey(1) & 0xFF
                     quit_pressed = keyboard.is_pressed('q') or key_in == ord('q')
@@ -260,7 +228,6 @@ def auto_fishing():
                 hsv_slider = cv2.cvtColor(slider_img, cv2.COLOR_BGR2HSV)
 
                 mask_green = cv2.inRange(hsv_slider, GREEN_LOWER, GREEN_UPPER)
-                
                 if MORPH_KERNEL_SIZE > 0:
                     kernel = np.ones((MORPH_KERNEL_SIZE, MORPH_KERNEL_SIZE), np.uint8)
                     mask_green = cv2.morphologyEx(mask_green, cv2.MORPH_CLOSE, kernel)
@@ -283,7 +250,6 @@ def auto_fishing():
                         cv2.rectangle(debug_view, (green_min_x, 0), (green_max_x, h-1), (0, 255, 0), 1)
                     if yellow_x is not None:
                         cv2.line(debug_view, (yellow_x, 0), (yellow_x, h-1), (0, 255, 255), 1)
-
                     vis_stack = np.vstack((
                         debug_view, 
                         cv2.cvtColor(mask_green, cv2.COLOR_GRAY2BGR),
@@ -300,10 +266,9 @@ def auto_fishing():
                 
                 if state == "IDLE":
                     if green_min_x is not None:
-                        miss_frames = 0
                         smooth_green_vel = 0.0
                         last_green_center = (green_min_x + green_max_x) // 2
-                        last_valid_time = time.time()
+                        last_valid_time = curr_time
                         
                         state = "REELING"
                         state_start_time = curr_time
@@ -339,36 +304,17 @@ def auto_fishing():
                         else:
                             switch_key(None)
                     else:
-                        miss_frames += 1
                         switch_key(None)
-
-                        if miss_frames > 10: 
-                            return "RESTART"
+                        return "RESTART"
 
     finally:
-        IS_RUNNING = False 
+        thread_running[0] = False 
         force_release_all_keys()
-        
-        # 仅在开启了调视窗口的情况下执行关闭
         if SHOW_DEBUG_VISION:
             cv2.destroyAllWindows()
-            
-        try:
-            pydirectinput.moveTo(0, 0)
-            time.sleep(0.05)
-            hwnd = get_hwnd_by_process_name(PROCESS_NAME)
-            if hwnd:
-                rect = win32gui.GetClientRect(hwnd)
-                point = win32gui.ClientToScreen(hwnd, (0, 0))
-                center_x = point[0] + rect[2] // 2
-                center_y = point[1] + rect[3] // 2
-                pydirectinput.moveTo(center_x, center_y)
-        except:
-            pass
-
 
 if __name__ == "__main__":
-    print(f"请将游戏窗口置于前台运行，按Q退出")
+    print("开始运行...按Q退出")
     while True:
         result = auto_fishing()
         if result == "QUIT":
